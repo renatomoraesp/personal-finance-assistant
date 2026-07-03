@@ -1,0 +1,33 @@
+This should be a backend app, AI-native app that implements a bot (first Telegram, later interations will probably pivot to WhatsApp) for personal finance.
+
+The idea is simple: ChatGPT/Claude-like experience where you can talk about your financial life as it happens in real time.
+
+This will focus on Brazil, and the first version will be for myself only (for cost reduction).
+
+We will use MeuPluggy for open finance integration (should be free when used for a single user, myself).
+
+This should be a Python app (use FastAPI and proper asynchronous logic, we will build it as a simple monolith at first, but might make it a microservice in the future, I want to have it ready to migrate to an asynchronous, distributed architecture in the future).
+
+Database is PostgreSQL, and we should use a proper docker/docker compose setup and make these containers, especially envisioning local development.
+
+Beyond that, architecture decisions in general are up to you.
+
+Prioritize making this professional looking, something a couple of Senior developers would design. This is still barely a demo as I will use it for myself, but if I like the end result I might turn it into a real product.
+
+This is only a sketch, not a full bootstrap. You are expected to use your taste and intelligence (and tools like web search) to expand from this extremely reduced and vague description to the desired professional end result. Again, you are expected to make decisions by yourself, no need to ask me before making them.
+
+Finally, a list of desired invariantes:
+
+1. Let's make this agent-friendly from the get-go. Follow this guide from OpenAI to design a proper `AGENTS.md` structure for the codebase, and also write a `CLAUDE.md` fully compatible with it (it should basically reflect `AGENTS.md` but optimized for Claude's best practices) so that future instances of you know how to work within this repo.
+
+2. Let's add a comprehensive test suite and design a great test design that will suit integration tests very well. We will be doing unit tests, but integration tests should be the focus as soon as this app takes up a proper shape and I start using it for myself.
+
+3. We should use SQLAlchemy, Pydantic and Alembic as a starting stack for integrating with the PostgreSQL database.
+
+4. As I said above, we should use MeuPluggy as the solution for back integration (to use Open Finance in Brazil). I already have a MeuPluggy account connected to one of my bank accounts and also a developer account with client id, client secret and api key created, so assume we already have those values and will use them once the app is fully implemented and we're ready to test. To properly learn how to use MeuPluggy, explore this link: https://docs.pluggy.ai/docs/quick-pluggy-introduction.
+
+5. Let's think about a good initial dev environemnt, meaning: whole stack should spin up on Docker containers locally and work, and the project should be managed with poetry (since we're doing Python); additionally, we should have `pre-commit` run before each commmit, and it should have the proper hooks in the correct order to make the check professional and future-proof. We should be doing a complete pass through pre-commit automatically and consider it an invariant for committing changes to the project.
+
+6. Let's design the project primarily with an advanced 'Pythonista' mindset; I will be using this project also as a reference for personal learning, I am a mid-level/senior Python engineer and want to start taking the steps to truly get to the next level, so this should look like what a very good and experienced Python backend engineer would design.
+
+7. Last, but not least: on the AI side, we should pivot to normal Q&A for now (think the classic ChatGPT/Claude experience plus modern agentic capabilities, so the bot should be able to answer about live financial data casually if asked about it, and also reason through it and give opinions/suggestions; a basic scenario is providing the user real-time info on what he/she spent on during the day and what he/she could do to spend less, if that is their goal). We will likely add proactive capabilities later, like sending messages to the user if he/she has spent more than they wanted to on that day, but this is a later feature. For now, let's focus on this Q&A side only. Additionally, for actual LLM inference, use OpenRouter (I have an API key, assume it will be given when the time to test the app comes); we want to use Gemma4 26b because it's cheap and I like the natural language understanding it provides for Brazilian Portuguese, you can find it there with the `google/gemma-4-26b-a4b-it` id.
