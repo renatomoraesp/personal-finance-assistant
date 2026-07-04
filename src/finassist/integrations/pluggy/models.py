@@ -48,3 +48,10 @@ class Page(BaseModel):
     total: int
     total_pages: int = Field(alias="totalPages")
     results: list[dict[str, Any]]
+
+
+class CursorPage(BaseModel):
+    """v2 cursor-paginated envelope; `next` is null on the last page."""
+
+    results: list[dict[str, Any]]
+    next: str | None = None

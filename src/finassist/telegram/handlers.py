@@ -1,7 +1,6 @@
 import time
 from collections.abc import Awaitable, Callable
 
-import httpx
 import structlog
 from aiogram import Router
 from aiogram.enums import ChatAction
@@ -16,7 +15,12 @@ from finassist.repositories.users import UserRepository
 from finassist.services.agent.service import AgentService
 from finassist.services.agent.tools import ToolDispatcher
 from finassist.services.finance import FinanceService
-from finassist.services.sync import SyncError, SyncService
+from finassist.services.sync import (
+    ATTENTION_STATUSES,
+    BackgroundSyncScheduler,
+    SyncError,
+    SyncService,
+)
 
 router = Router()
 logger = structlog.get_logger()
@@ -28,15 +32,6 @@ async def _with_session(
 ) -> str:
     async with session_factory() as session:
         return await callback(session)
-
-
-def _pluggy(settings: Settings, http: httpx.AsyncClient) -> PluggyClient:
-    return PluggyClient(
-        http,
-        base_url=settings.pluggy_base_url,
-        client_id=settings.pluggy_client_id,
-        client_secret=settings.pluggy_client_secret.get_secret_value(),
-    )
 
 
 async def _reply_chunks(message: Message, text: str) -> None:
@@ -78,23 +73,36 @@ async def help_handler(message: Message) -> None:
 async def sync_handler(
     message: Message,
     settings: Settings,
-    http_client: httpx.AsyncClient,
+    pluggy_client: PluggyClient,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     started = time.monotonic()
 
     async def work(session: AsyncSession) -> str:
-        service = SyncService(session, _pluggy(settings, http_client), settings)
+        service = SyncService(session, pluggy_client, settings)
         try:
             run = await service.sync()
         except SyncError:
             return "Não consegui atualizar seus dados agora. Tente novamente em alguns minutos."
         duration = time.monotonic() - started
-        return (
+        reply = (
             f"Sincronização concluída em {duration:.1f}s. "
             f"Contas: {run.stats.get('accounts', 0)}. "
             f"Transações: {run.stats.get('transactions_upserted', 0)}."
         )
+        attention = sorted(
+            {
+                status
+                for status in run.stats.get("items", {}).values()
+                if status in ATTENTION_STATUSES
+            }
+        )
+        if attention:
+            reply += (
+                "\n⚠️ Sua conexão bancária precisa de atenção no MeuPluggy "
+                f"(status: {', '.join(attention)})."
+            )
+        return reply
 
     await message.answer(await _with_session(session_factory, work))
 
@@ -103,8 +111,9 @@ async def sync_handler(
 async def text_handler(
     message: Message,
     settings: Settings,
-    http_client: httpx.AsyncClient,
+    pluggy_client: PluggyClient,
     openrouter_client: OpenRouterClient,
+    sync_scheduler: BackgroundSyncScheduler,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     text = message.text
@@ -117,8 +126,9 @@ async def text_handler(
     async def work(session: AsyncSession) -> str:
         user = await UserRepository(session).upsert(from_user.id, from_user.first_name)
         finance = FinanceService(session)
-        sync = SyncService(session, _pluggy(settings, http_client), settings)
-        agent = AgentService(session, settings, openrouter_client, ToolDispatcher(finance, sync))
+        sync = SyncService(session, pluggy_client, settings)
+        tools = ToolDispatcher(finance, sync, sync_scheduler)
+        agent = AgentService(session, settings, openrouter_client, tools)
         return await agent.answer(user, message.chat.id, text)
 
     await _reply_chunks(message, await _with_session(session_factory, work))

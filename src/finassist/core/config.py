@@ -25,9 +25,11 @@ class Settings(BaseSettings):
     openrouter_api_key: SecretStr
     openrouter_model: str = "google/gemma-4-26b-a4b-it"
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
-    sync_max_age_minutes: int = 30
+    sync_max_age_minutes: int = 10
     sync_initial_lookback_days: int = 90
     sync_overlap_days: int = 7
+    sync_refresh_timeout_seconds: int = 90
+    sync_refresh_poll_seconds: float = 2.0
     agent_max_tool_rounds: int = 6
     agent_history_limit: int = 20
     agent_temperature: float = 0.4

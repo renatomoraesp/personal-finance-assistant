@@ -53,6 +53,15 @@ Configuration comes from `.env` (see `.env.example`). Never commit `.env` or pri
   and treat `type` (DEBIT/CREDIT) as the direction authority. All "money out" logic lives in ONE
   place: `services/finance.py`. Never re-derive outflow logic elsewhere.
 - Pluggy API keys expire after 2h; the client re-auths lazily. Don't cache clients across settings.
+- A sync is a HARD refresh: `PATCH /items/{id}` asks Pluggy to re-sync with the bank, we wait
+  (bounded) for the item to leave UPDATING, then pull. Pluggy forbids batch/cron update polling —
+  refreshes must stay user-triggered and throttled by the `SYNC_MAX_AGE_MINUTES` staleness gate;
+  treat 409 on PATCH as benign (already syncing / too frequent).
+- Agent read tools are fire-and-forget: `BackgroundSyncScheduler.kick_if_stale()` answers from
+  cache and spawns at most one in-process refresh task; only `/sync` and the `sync_now` tool
+  block until the refresh finishes. Don't make read paths await a bank sync.
+- Transactions come from `GET /v2/transactions` (cursor pagination via `after`/`next`). The v1
+  page-based endpoint is deprecated and is removed after 2026-12-31 — don't reintroduce it.
 - `PATCH /items` (bank refresh) is rate-limited to 20/min and user-triggered only — never poll it.
 
 ## Testing

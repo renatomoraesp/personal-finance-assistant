@@ -1,14 +1,32 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Any, TypeVar
+from urllib.parse import parse_qs
 
 import httpx
 from pydantic import BaseModel
 
 from finassist.integrations.pluggy.errors import PluggyAuthError, PluggyError, PluggyNotFoundError
-from finassist.integrations.pluggy.models import Page, PluggyAccount, PluggyItem, PluggyTransaction
+from finassist.integrations.pluggy.models import (
+    CursorPage,
+    Page,
+    PluggyAccount,
+    PluggyItem,
+    PluggyTransaction,
+)
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
+
+
+def _after_cursor(next_value: str) -> str:
+    """Extract the `after` cursor from a v2 `next` value.
+
+    The API documents `next` as a query string for the following page
+    (e.g. "accountId=...&after=..."); tolerate a bare cursor as well.
+    """
+    query = next_value.split("?", 1)[-1]
+    after = parse_qs(query).get("after")
+    return after[0] if after else next_value
 
 
 class PluggyClient:
@@ -56,6 +74,7 @@ class PluggyClient:
         path: str,
         *,
         params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
         retried_auth: bool = False,
         retried_rate_limit: bool = False,
     ) -> httpx.Response:
@@ -64,12 +83,13 @@ class PluggyClient:
             method,
             f"{self.base_url}{path}",
             params=params,
+            json=json,
             headers={"X-API-KEY": api_key},
         )
         if response.status_code in {401, 403} and not retried_auth:
             self._api_key = None
             await self._authenticate()
-            return await self._request(method, path, params=params, retried_auth=True)
+            return await self._request(method, path, params=params, json=json, retried_auth=True)
         if response.status_code == 429 and not retried_rate_limit:
             retry_after = response.headers.get("Retry-After")
             if retry_after is not None:
@@ -78,6 +98,7 @@ class PluggyClient:
                     method,
                     path,
                     params=params,
+                    json=json,
                     retried_auth=retried_auth,
                     retried_rate_limit=True,
                 )
@@ -102,6 +123,16 @@ class PluggyClient:
         response = await self._request("GET", f"/items/{item_id}")
         return PluggyItem.model_validate(response.json())
 
+    async def update_item(self, item_id: str) -> PluggyItem:
+        """Trigger a new synchronization between Pluggy and the institution.
+
+        An empty body reuses the stored credentials/consent. Raises PluggyError
+        with status_code 409 when an update was requested before the allowed
+        frequency or one is already in flight.
+        """
+        response = await self._request("PATCH", f"/items/{item_id}", json={})
+        return PluggyItem.model_validate(response.json())
+
     async def get_accounts(self, item_id: str) -> list[PluggyAccount]:
         response = await self._request("GET", "/accounts", params={"itemId": item_id})
         page = Page.model_validate(response.json())
@@ -114,22 +145,21 @@ class PluggyClient:
         date_from: str,
         date_to: str,
     ) -> list[PluggyTransaction]:
+        # v1 GET /transactions is deprecated (removed after 2026-12-31);
+        # v2 pages with an `after` cursor taken from each response's `next`.
         transactions: list[PluggyTransaction] = []
-        page_number = 1
+        after: str | None = None
         while True:
-            response = await self._request(
-                "GET",
-                "/transactions",
-                params={
-                    "accountId": account_id,
-                    "from": date_from,
-                    "to": date_to,
-                    "pageSize": 500,
-                    "page": page_number,
-                },
-            )
-            page = Page.model_validate(response.json())
+            params: dict[str, Any] = {
+                "accountId": account_id,
+                "dateFrom": date_from,
+                "dateTo": date_to,
+            }
+            if after is not None:
+                params["after"] = after
+            response = await self._request("GET", "/v2/transactions", params=params)
+            page = CursorPage.model_validate(response.json())
             transactions.extend(PluggyTransaction.model_validate(raw) for raw in page.results)
-            if page.page >= page.total_pages:
+            if not page.next:
                 return transactions
-            page_number += 1
+            after = _after_cursor(page.next)

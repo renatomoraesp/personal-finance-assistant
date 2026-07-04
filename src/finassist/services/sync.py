@@ -1,16 +1,27 @@
 import asyncio
+import contextlib
+import time
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from sqlalchemy.ext.asyncio import AsyncSession
+import structlog
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from finassist.core.config import Settings
 from finassist.db.models import SyncRun, utc_now
 from finassist.integrations.pluggy.client import PluggyClient
+from finassist.integrations.pluggy.errors import PluggyError
+from finassist.integrations.pluggy.models import PluggyItem
 from finassist.repositories.accounts import AccountRepository, PluggyItemRepository
 from finassist.repositories.sync_runs import SyncRunRepository
 from finassist.repositories.transactions import TransactionRepository
+
+logger = structlog.get_logger()
+
+#: Item statuses that require the user to act in MeuPluggy/Pluggy Connect
+#: (re-consent, new credentials, MFA) before bank syncs can succeed again.
+ATTENTION_STATUSES = frozenset({"LOGIN_ERROR", "WAITING_USER_INPUT", "OUTDATED"})
 
 
 class SyncError(Exception):
@@ -35,17 +46,10 @@ class SyncService:
         self.runs = SyncRunRepository(session)
         self._lock = asyncio.Lock()
 
-    async def ensure_fresh(self) -> SyncRun | None:
-        if await self.runs.is_latest_success_younger_than(
-            timedelta(minutes=self.settings.sync_max_age_minutes)
-        ):
-            return None
-        return await self.sync()
-
     async def sync(self) -> SyncRun:
         async with self._lock:
             run = await self.runs.create_running()
-            stats: dict[str, Any] = {"accounts": 0, "transactions_upserted": 0}
+            stats: dict[str, Any] = {"accounts": 0, "transactions_upserted": 0, "items": {}}
             try:
                 for item_id in self.settings.pluggy_item_ids:
                     await self._sync_item(item_id, stats)
@@ -57,8 +61,30 @@ class SyncService:
                 await self.session.commit()
                 raise SyncError(str(exc)) from exc
 
+    async def _refresh_item(self, item_id: str) -> PluggyItem:
+        """Ask Pluggy to re-sync the item with the bank, then wait (bounded).
+
+        Liveness beats strict freshness: if the refresh can't be triggered
+        (409 = already syncing or before Pluggy's allowed frequency) or does
+        not finish within the timeout, continue with whatever Pluggy has.
+        """
+        try:
+            await self.pluggy_client.update_item(item_id)
+        except PluggyError as exc:
+            log = logger.debug if exc.status_code == 409 else logger.warning
+            log("pluggy_item_refresh_not_triggered", item_id=item_id, code=exc.code)
+        deadline = time.monotonic() + self.settings.sync_refresh_timeout_seconds
+        item = await self.pluggy_client.get_item(item_id)
+        while item.status == "UPDATING" and time.monotonic() < deadline:
+            await asyncio.sleep(self.settings.sync_refresh_poll_seconds)
+            item = await self.pluggy_client.get_item(item_id)
+        if item.status == "UPDATING":
+            logger.warning("pluggy_item_refresh_timeout", item_id=item_id)
+        return item
+
     async def _sync_item(self, item_id: str, stats: dict[str, Any]) -> None:
-        item_payload = await self.pluggy_client.get_item(item_id)
+        item_payload = await self._refresh_item(item_id)
+        stats["items"][item_id] = item_payload.status
         existing = await self.items.get_by_pluggy_id(item_id)
         item = await self.items.upsert(pluggy_item_id=item_id, status=item_payload.status)
         today = datetime.now(ZoneInfo(self.settings.timezone)).date()
@@ -105,3 +131,60 @@ class SyncService:
         if last_synced_at is None:
             return today - timedelta(days=self.settings.sync_initial_lookback_days)
         return last_synced_at.date() - timedelta(days=self.settings.sync_overlap_days)
+
+
+class BackgroundSyncScheduler:
+    """Fire-and-forget bank refresh: answer from cache now, refresh behind.
+
+    Owns at most one in-flight background sync for the whole process. The
+    freshness window restarts only when a refresh *completes* (a successful
+    SyncRun is recorded), so a slow bank sync never blocks a chat answer and
+    never stacks up concurrent refreshes.
+    """
+
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        pluggy_client: PluggyClient,
+        settings: Settings,
+    ) -> None:
+        self._session_factory = session_factory
+        self._pluggy_client = pluggy_client
+        self._settings = settings
+        self._task: asyncio.Task[None] | None = None
+
+    @property
+    def refreshing(self) -> bool:
+        return self._task is not None and not self._task.done()
+
+    async def kick_if_stale(self) -> bool:
+        """Start a background sync when data is stale; never blocks.
+
+        Returns True when a refresh is (now) running, i.e. the caller is
+        about to answer from data that may be minutes old.
+        """
+        if self.refreshing:
+            return True
+        async with self._session_factory() as session:
+            fresh = await SyncRunRepository(session).is_latest_success_younger_than(
+                timedelta(minutes=self._settings.sync_max_age_minutes)
+            )
+        if fresh:
+            return False
+        if self.refreshing:  # another caller won the race during the query
+            return True
+        self._task = asyncio.create_task(self._run())
+        return True
+
+    async def _run(self) -> None:
+        try:
+            async with self._session_factory() as session:
+                await SyncService(session, self._pluggy_client, self._settings).sync()
+        except Exception:
+            logger.exception("background_sync_failed")
+
+    async def stop(self) -> None:
+        if self._task is not None and not self._task.done():
+            self._task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._task

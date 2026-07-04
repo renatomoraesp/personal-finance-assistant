@@ -38,7 +38,7 @@ async def test_auth_key_is_cached_and_reauths_once_on_unauthorized() -> None:
 
 
 @pytest.mark.asyncio
-async def test_transactions_pagination() -> None:
+async def test_transactions_cursor_pagination() -> None:
     async with httpx.AsyncClient() as http:
         client = PluggyClient(
             http,
@@ -50,33 +50,29 @@ async def test_transactions_pagination() -> None:
             router.post("https://pluggy.test/auth").mock(
                 return_value=httpx.Response(200, json={"apiKey": "k"})
             )
-            route = router.get("https://pluggy.test/transactions").mock(
+            route = router.get("https://pluggy.test/v2/transactions").mock(
                 side_effect=[
+                    # `next` as a query string (documented shape) …
                     httpx.Response(
                         200,
                         json={
-                            "total": 3,
-                            "totalPages": 3,
-                            "page": 1,
                             "results": [pluggy_transaction_payload("tx-1")],
+                            "next": "accountId=acc-1&dateFrom=2026-07-01&after=cursor-2",
                         },
                     ),
+                    # … and as a bare cursor, which the client must also accept.
                     httpx.Response(
                         200,
                         json={
-                            "total": 3,
-                            "totalPages": 3,
-                            "page": 2,
                             "results": [pluggy_transaction_payload("tx-2")],
+                            "next": "cursor-3",
                         },
                     ),
                     httpx.Response(
                         200,
                         json={
-                            "total": 3,
-                            "totalPages": 3,
-                            "page": 3,
                             "results": [pluggy_transaction_payload("tx-3")],
+                            "next": None,
                         },
                     ),
                 ]
@@ -90,6 +86,9 @@ async def test_transactions_pagination() -> None:
 
     assert [row.id for row in rows] == ["tx-1", "tx-2", "tx-3"]
     assert route.call_count == 3
+    assert "after" not in route.calls[0].request.url.params
+    assert route.calls[1].request.url.params["after"] == "cursor-2"
+    assert route.calls[2].request.url.params["after"] == "cursor-3"
 
 
 @pytest.mark.asyncio

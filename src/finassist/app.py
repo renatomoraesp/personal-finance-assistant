@@ -9,6 +9,8 @@ from finassist.core.config import get_settings
 from finassist.core.logging import configure_logging
 from finassist.db.session import create_engine, create_session_factory
 from finassist.integrations.openrouter.client import OpenRouterClient
+from finassist.integrations.pluggy.client import PluggyClient
+from finassist.services.sync import BackgroundSyncScheduler
 from finassist.telegram.bot import create_bot, create_dispatcher
 from finassist.telegram.runner import TelegramRunner
 
@@ -26,11 +28,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         model=settings.openrouter_model,
         temperature=settings.agent_temperature,
     )
+    # One shared Pluggy client so the 2h API key is cached across handlers
+    # and the background scheduler.
+    pluggy_client = PluggyClient(
+        http_client,
+        base_url=settings.pluggy_base_url,
+        client_id=settings.pluggy_client_id,
+        client_secret=settings.pluggy_client_secret.get_secret_value(),
+    )
+    sync_scheduler = BackgroundSyncScheduler(session_factory, pluggy_client, settings)
     app.state.settings = settings
     app.state.engine = engine
     app.state.session_factory = session_factory
     app.state.http_client = http_client
     app.state.openrouter_client = openrouter_client
+    app.state.pluggy_client = pluggy_client
+    app.state.sync_scheduler = sync_scheduler
 
     runner: TelegramRunner | None = None
     if settings.telegram_polling_enabled:
@@ -38,8 +51,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         dispatcher = create_dispatcher(
             settings=settings,
             session_factory=session_factory,
-            http_client=http_client,
+            pluggy_client=pluggy_client,
             openrouter_client=openrouter_client,
+            sync_scheduler=sync_scheduler,
         )
         runner = TelegramRunner(bot, dispatcher)
         await runner.start()
@@ -48,6 +62,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         if runner is not None:
             await runner.stop()
+        await sync_scheduler.stop()
         await http_client.aclose()
         await engine.dispose()
 

@@ -31,8 +31,13 @@ Telegram ──▶ aiogram handlers (thin)
               PostgreSQL ◀──────── Pluggy API (Open Finance)
 ```
 
-- **Sync**: transactions and balances are cached in Postgres; a staleness gate refreshes from
-  Pluggy before the agent answers data questions. `/sync` forces it.
+- **Sync**: transactions and balances are cached in Postgres. A staleness gate guarantees
+  liveness without blocking chat: the first message after `SYNC_MAX_AGE_MINUTES` (default 10)
+  is answered from cache immediately while a background task performs a *hard* refresh —
+  Pluggy is asked to re-sync with the bank (`PATCH /items/{id}`), we wait (bounded) for it to
+  finish, then pull the fresh data. The window restarts when the refresh completes, and the
+  LLM is told (via a `refreshing` flag) when it is answering from possibly stale data.
+  `/sync` runs the same flow synchronously on demand.
 - **Agent**: the LLM never sees raw credentials and never invents data — factual answers come
   from tool calls against the local database.
 - **FastAPI** hosts health endpoints (`/healthz`, `/readyz`) and the app lifecycle; the bot runs

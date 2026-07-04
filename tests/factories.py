@@ -3,10 +3,10 @@ from decimal import Decimal
 from typing import Any
 
 
-def pluggy_item_payload(item_id: str = "item-1") -> dict[str, Any]:
+def pluggy_item_payload(item_id: str = "item-1", status: str = "UPDATED") -> dict[str, Any]:
     return {
         "id": item_id,
-        "status": "UPDATED",
+        "status": status,
         "executionStatus": "SUCCESS",
         "lastUpdatedAt": datetime.now(UTC).isoformat(),
     }

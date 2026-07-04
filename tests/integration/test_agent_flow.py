@@ -9,7 +9,7 @@ from typing import Any, cast
 import httpx
 import pytest
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from finassist.core.config import Settings
 from finassist.db.models import Message
@@ -21,7 +21,7 @@ from finassist.repositories.users import UserRepository
 from finassist.services.agent.service import AgentService, ChatClient
 from finassist.services.agent.tools import ToolDispatcher
 from finassist.services.finance import FinanceService
-from finassist.services.sync import SyncService
+from finassist.services.sync import BackgroundSyncScheduler, SyncService
 
 pytestmark = pytest.mark.integration
 
@@ -97,27 +97,38 @@ async def _seed_finances(session: AsyncSession) -> None:
     await runs.finish_success(await runs.create_running(), {})
 
 
-async def test_agent_answers_from_seeded_data(db_session: AsyncSession, settings: Settings) -> None:
+async def test_agent_answers_from_seeded_data(
+    db_session: AsyncSession, engine: AsyncEngine, settings: Settings
+) -> None:
     await _seed_finances(db_session)
     user = await UserRepository(db_session).upsert(123, "Renato")
+    # The scheduler checks freshness through its own session, so the seeded
+    # SyncRun must be committed, not just flushed.
+    await db_session.commit()
 
     chat = ScriptedChat()
     async with httpx.AsyncClient() as http:
         pluggy = PluggyClient(
             http, base_url="https://pluggy.test", client_id="id", client_secret="s"
         )
+        scheduler = BackgroundSyncScheduler(
+            async_sessionmaker(engine, expire_on_commit=False), pluggy, settings
+        )
         sync = SyncService(db_session, pluggy, settings)
-        dispatcher = ToolDispatcher(FinanceService(db_session), sync)
+        dispatcher = ToolDispatcher(FinanceService(db_session), sync, scheduler)
         agent = AgentService(db_session, settings, cast(ChatClient, chat), dispatcher)
 
         reply = await agent.answer(user, chat_id=456, text="quanto gastei essa semana?")
 
     assert reply == "Você gastou R$ 50,00 no período."
+    # Data was fresh, so no background refresh was started.
+    assert scheduler.refreshing is False
 
     # The tool result fed to the model reflects the real SQL aggregation.
     summary = json.loads(chat.tool_payloads[0])
-    assert summary["grand_total"] == "50.00"
-    assert {row["key"] for row in summary["rows"]} == {"Mercado", "Transporte"}
+    assert summary["refreshing"] is False
+    assert summary["data"]["grand_total"] == "50.00"
+    assert {row["key"] for row in summary["data"]["rows"]} == {"Mercado", "Transporte"}
 
     # The whole exchange is persisted: user, tool-call round, tool result, final answer.
     rows = (await db_session.execute(select(Message).order_by(Message.created_at))).scalars().all()
