@@ -3,6 +3,8 @@ from dataclasses import asdict
 from datetime import date
 from typing import Any
 
+from finassist.db.models import User
+from finassist.repositories.memories import MemoryRepository
 from finassist.services.finance import FinanceService
 from finassist.services.sync import BackgroundSyncScheduler, SyncService
 
@@ -73,6 +75,39 @@ TOOLS: list[dict[str, Any]] = [
             "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "remember_fact",
+            "description": (
+                "Store a durable personal fact the user stated (income, rent, recurring bills, "
+                "financial goals, preferences). Use proactively when the user shares lasting "
+                "information; do not store one-off questions or transient chatter."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"content": {"type": "string"}},
+                "required": ["content"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "forget_fact",
+            "description": (
+                "Delete a stored memory when the user asks to forget something. Pass the short "
+                "id shown in the memory list."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"memory_id": {"type": "string"}},
+                "required": ["memory_id"],
+                "additionalProperties": False,
+            },
+        },
+    },
 ]
 
 
@@ -82,10 +117,14 @@ class ToolDispatcher:
         finance: FinanceService,
         sync: SyncService,
         scheduler: BackgroundSyncScheduler,
+        memories: MemoryRepository,
+        user: User,
     ) -> None:
         self.finance = finance
         self.sync = sync
         self.scheduler = scheduler
+        self.memories = memories
+        self.user = user
 
     async def dispatch(self, name: str, arguments_json: str) -> str:
         args = json.loads(arguments_json or "{}")
@@ -124,6 +163,15 @@ class ToolDispatcher:
         elif name == "sync_now":
             run = await self.sync.sync()
             payload = {"status": run.status, "stats": run.stats}
+        elif name == "remember_fact":
+            await self.memories.add(user_id=self.user.id, content=args["content"])
+            payload = {"status": "saved"}
+        elif name == "forget_fact":
+            deleted = await self.memories.delete_by_prefix(
+                user_id=self.user.id,
+                id_prefix=args["memory_id"],
+            )
+            payload = {"status": "deleted"} if deleted else {"error": "memory not found"}
         else:
             payload = {"error": f"Unknown tool: {name}"}
         return json.dumps(payload, default=str, ensure_ascii=False)

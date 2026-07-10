@@ -12,7 +12,9 @@ from finassist.integrations.openrouter.client import OpenRouterClient
 from finassist.integrations.pluggy.client import PluggyClient
 from finassist.services.sync import BackgroundSyncScheduler
 from finassist.telegram.bot import create_bot, create_dispatcher
+from finassist.telegram.inbox import ChatInbox
 from finassist.telegram.runner import TelegramRunner
+from finassist.telegram.turns import TurnProcessor
 
 
 @asynccontextmanager
@@ -27,6 +29,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         base_url=settings.openrouter_base_url,
         model=settings.openrouter_model,
         temperature=settings.agent_temperature,
+        fallback_models=settings.openrouter_fallback_models,
+        timeout_seconds=settings.openrouter_timeout_seconds,
+        max_retries=settings.openrouter_max_retries,
+        transcription_model=settings.openrouter_transcription_model,
     )
     # One shared Pluggy client so the 2h API key is cached across handlers
     # and the background scheduler.
@@ -37,6 +43,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         client_secret=settings.pluggy_client_secret.get_secret_value(),
     )
     sync_scheduler = BackgroundSyncScheduler(session_factory, pluggy_client, settings)
+    turn_processor = TurnProcessor(
+        settings=settings,
+        pluggy_client=pluggy_client,
+        openrouter_client=openrouter_client,
+        sync_scheduler=sync_scheduler,
+        session_factory=session_factory,
+    )
+    inbox = ChatInbox(
+        process=turn_processor.process,
+        debounce_seconds=settings.agent_debounce_seconds,
+    )
     app.state.settings = settings
     app.state.engine = engine
     app.state.session_factory = session_factory
@@ -44,6 +61,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.openrouter_client = openrouter_client
     app.state.pluggy_client = pluggy_client
     app.state.sync_scheduler = sync_scheduler
+    app.state.inbox = inbox
 
     runner: TelegramRunner | None = None
     if settings.telegram_polling_enabled:
@@ -54,6 +72,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             pluggy_client=pluggy_client,
             openrouter_client=openrouter_client,
             sync_scheduler=sync_scheduler,
+            inbox=inbox,
         )
         runner = TelegramRunner(bot, dispatcher)
         await runner.start()
@@ -62,6 +81,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         if runner is not None:
             await runner.stop()
+        await inbox.stop()
         await sync_scheduler.stop()
         await http_client.aclose()
         await engine.dispose()

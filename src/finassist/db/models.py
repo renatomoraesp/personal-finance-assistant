@@ -13,7 +13,6 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
-    UniqueConstraint,
     Uuid,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -38,6 +37,21 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
     conversations: Mapped[list["Conversation"]] = relationship(back_populates="user")
+    memories: Mapped[list["UserMemory"]] = relationship(back_populates="user")
+
+
+class UserMemory(Base):
+    __tablename__ = "user_memories"
+
+    id: Mapped[uuid.UUID] = mapped_column(UuidType, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(UuidType, ForeignKey("users.id"), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+    user: Mapped[User] = relationship(back_populates="memories")
 
 
 class PluggyItem(Base):
@@ -105,11 +119,20 @@ class Transaction(Base):
 
 class Conversation(Base):
     __tablename__ = "conversations"
-    __table_args__ = (UniqueConstraint("user_id", "telegram_chat_id"),)
+    __table_args__ = (
+        Index(
+            "ix_conversations_user_chat_created",
+            "user_id",
+            "telegram_chat_id",
+            "created_at",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UuidType, primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(UuidType, ForeignKey("users.id"), nullable=False)
     telegram_chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    last_message_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
     user: Mapped[User] = relationship(back_populates="conversations")

@@ -2,8 +2,7 @@ import time
 from collections.abc import Awaitable, Callable
 
 import structlog
-from aiogram import Router
-from aiogram.enums import ChatAction
+from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import ErrorEvent, Message
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -11,19 +10,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from finassist.core.config import Settings
 from finassist.integrations.openrouter.client import OpenRouterClient
 from finassist.integrations.pluggy.client import PluggyClient
+from finassist.repositories.conversations import ConversationRepository
 from finassist.repositories.users import UserRepository
-from finassist.services.agent.service import AgentService
-from finassist.services.agent.tools import ToolDispatcher
-from finassist.services.finance import FinanceService
-from finassist.services.sync import (
-    ATTENTION_STATUSES,
-    BackgroundSyncScheduler,
-    SyncError,
-    SyncService,
-)
+from finassist.services.sync import ATTENTION_STATUSES, SyncError, SyncService
+from finassist.telegram.inbox import ChatInbox, InboundItem
 
 router = Router()
-logger = structlog.get_logger()
+logger = structlog.get_logger(__name__)
 
 
 async def _with_session(
@@ -32,11 +25,6 @@ async def _with_session(
 ) -> str:
     async with session_factory() as session:
         return await callback(session)
-
-
-async def _reply_chunks(message: Message, text: str) -> None:
-    for start in range(0, len(text), 4000):
-        await message.answer(text[start : start + 4000])
 
 
 @router.message(Command("start"))
@@ -51,11 +39,13 @@ async def start_handler(
         await UserRepository(session).upsert(user.id, user.first_name)
         await session.commit()
         return (
-            "Olá! Eu posso consultar seus dados financeiros conectados via Pluggy.\n\n"
+            "Olá! Eu posso consultar seus dados financeiros conectados via Pluggy. "
+            "Pode falar comigo por texto ou áudio.\n\n"
             "Exemplos:\n"
             "• quanto gastei hoje?\n"
             "• quais foram meus maiores gastos do mês?\n"
-            "• como posso economizar mais?"
+            "• como posso economizar mais?\n\n"
+            "Use /sync para atualizar os dados bancários e /reset para começar uma conversa nova."
         )
 
     await message.answer(await _with_session(session_factory, work))
@@ -64,8 +54,8 @@ async def start_handler(
 @router.message(Command("help"))
 async def help_handler(message: Message) -> None:
     await message.answer(
-        "Me envie perguntas sobre seus saldos, transações e gastos. "
-        "Use /sync para atualizar os dados agora."
+        "Me envie perguntas por texto ou áudio sobre seus saldos, transações e gastos. "
+        "Use /sync para atualizar os dados bancários agora e /reset para começar do zero."
     )
 
 
@@ -107,31 +97,69 @@ async def sync_handler(
     await message.answer(await _with_session(session_factory, work))
 
 
-@router.message()
-async def text_handler(
+@router.message(Command("reset"))
+async def reset_handler(
     message: Message,
-    settings: Settings,
-    pluggy_client: PluggyClient,
-    openrouter_client: OpenRouterClient,
-    sync_scheduler: BackgroundSyncScheduler,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    text = message.text
-    from_user = message.from_user
-    bot = message.bot
-    if text is None or from_user is None or bot is None:
-        return
-    await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.TYPING)
-
     async def work(session: AsyncSession) -> str:
+        from_user = message.from_user
+        if from_user is None:
+            return "Não consegui identificar seu usuário do Telegram."
         user = await UserRepository(session).upsert(from_user.id, from_user.first_name)
-        finance = FinanceService(session)
-        sync = SyncService(session, pluggy_client, settings)
-        tools = ToolDispatcher(finance, sync, sync_scheduler)
-        agent = AgentService(session, settings, openrouter_client, tools)
-        return await agent.answer(user, message.chat.id, text)
+        await ConversationRepository(session).close_active(
+            user_id=user.id,
+            telegram_chat_id=message.chat.id,
+        )
+        await session.commit()
+        return "Prontinho, começamos do zero! O que você quer saber?"
 
-    await _reply_chunks(message, await _with_session(session_factory, work))
+    await message.answer(await _with_session(session_factory, work))
+
+
+@router.message(F.text)
+async def text_handler(message: Message, inbox: ChatInbox) -> None:
+    if message.text is not None:
+        inbox.submit(InboundItem(message=message, text=message.text))
+
+
+@router.message(F.voice)
+async def voice_handler(
+    message: Message,
+    openrouter_client: OpenRouterClient,
+    inbox: ChatInbox,
+) -> None:
+    voice = message.voice
+    bot = message.bot
+    if voice is None or bot is None:
+        return
+    if voice.duration > 300:
+        await message.answer("Esse áudio é bem longo! Consigo entender áudios de até 5 minutos.")
+        return
+
+    try:
+        buffer = await bot.download(voice)
+        if buffer is None:
+            raise RuntimeError("Telegram returned no voice data")
+        transcript = await openrouter_client.transcribe(
+            filename="voice.ogg",
+            data=buffer.read(),
+            language="pt",
+        )
+    except Exception:
+        logger.exception("voice_transcription_failed", chat_id=message.chat.id)
+        await message.answer(
+            "Não consegui entender esse áudio agora. Pode escrever ou tentar de novo?"
+        )
+        return
+
+    await message.reply(f'🎙️ "{transcript}"')
+    inbox.submit(InboundItem(message=message, text=transcript))
+
+
+@router.message()
+async def unsupported_message_handler(message: Message) -> None:
+    await message.answer("Por enquanto eu entendo mensagens de texto e áudio. 📝🎙️")
 
 
 @router.errors()

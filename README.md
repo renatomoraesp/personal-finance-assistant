@@ -18,17 +18,21 @@ into services later if it ever becomes a product.
 ## How it works
 
 ```
-Telegram ──▶ aiogram handlers (thin)
+Telegram ──▶ aiogram handlers (thin; voice notes are transcribed first)
                   │
                   ▼
-             AgentService ──── tool-calling loop ────▶ OpenRouter (Gemma 4 26B)
-                  │ tools: get_balances, list_transactions,
-                  │        summarize_spending, sync_now
+             ChatInbox ── debounces rapid messages into one turn,
+                  │       serializes turns per chat
                   ▼
-             FinanceService / SyncService
-                  │                    │
-                  ▼                    ▼
-              PostgreSQL ◀──────── Pluggy API (Open Finance)
+             TurnProcessor ──▶ AgentService ── tool-calling loop ──▶ OpenRouter (Gemma 4 26B)
+                  │                 │ tools: get_balances, list_transactions,
+                  │                 │        summarize_spending, sync_now,
+                  │                 │        remember_fact, forget_fact
+                  ▼                 ▼
+             rendering        FinanceService / SyncService
+             (entities,            │                    │
+              chunking)            ▼                    ▼
+                               PostgreSQL ◀──────── Pluggy API (Open Finance)
 ```
 
 - **Sync**: transactions and balances are cached in Postgres. A staleness gate guarantees
@@ -40,6 +44,12 @@ Telegram ──▶ aiogram handlers (thin)
   `/sync` runs the same flow synchronously on demand.
 - **Agent**: the LLM never sees raw credentials and never invents data — factual answers come
   from tool calls against the local database.
+- **Chat UX**: rapid consecutive messages are debounced into a single agent turn and turns are
+  serialized per chat; the typing indicator stays alive for the whole tool loop; voice notes are
+  transcribed (Whisper via OpenRouter) and answered like text; replies are rendered as Telegram
+  entities (no parse-mode errors) and chunked safely. Conversations expire into fresh sessions
+  after inactivity (`/reset` forces it), recent tool results are replayed for grounded follow-ups,
+  and the agent keeps long-term memories the user can ask it to forget.
 - **FastAPI** hosts health endpoints (`/healthz`, `/readyz`) and the app lifecycle; the bot runs
   as a polling task inside the app lifespan (webhook mode is a planned follow-up).
 

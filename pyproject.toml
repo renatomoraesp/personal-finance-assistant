@@ -17,6 +17,7 @@ dependencies = [
   "openai>=1.59,<2",
   "structlog>=25,<27",
   "greenlet>=3.1,<4",
+  "telegramify-markdown (>=1.2,<2)",
 ]
 
 [tool.poetry]
@@ -55,6 +56,11 @@ mypy_path = "src"
 [[tool.mypy.overrides]]
 module = ["testcontainers.*", "respx.*"]
 ignore_missing_imports = true
+
+# telegramify-markdown publishes annotations but does not include a py.typed marker.
+[[tool.mypy.overrides]]
+module = ["telegramify_markdown", "telegramify_markdown.*"]
+follow_untyped_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

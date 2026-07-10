@@ -33,7 +33,9 @@ Configuration comes from `.env` (see `.env.example`). Never commit `.env` or pri
 - `src/finassist/services/` — business logic: `sync` (Pluggy → DB), `finance` (queries/aggregations),
   `agent/` (LLM tool-calling loop, tool schemas, pt-BR system prompt).
 - `src/finassist/integrations/` — outbound HTTP clients (Pluggy, OpenRouter). Thin, injectable.
-- `src/finassist/telegram/` — aiogram bot. Handlers must stay thin: parse → service → reply.
+- `src/finassist/telegram/` — aiogram bot. Handlers must stay thin: parse → inbox/service → reply.
+  `inbox.py` (per-chat debounced batching + serialization), `turns.py` (batch → agent → reply
+  orchestration), `rendering.py` (LLM markdown → Telegram entities, chunking, fallbacks).
 - `src/finassist/api/` — FastAPI routes (`/healthz`, `/readyz`); the bot runs from app lifespan.
 
 ## Code style
@@ -63,6 +65,14 @@ Configuration comes from `.env` (see `.env.example`). Never commit `.env` or pri
 - Transactions come from `GET /v2/transactions` (cursor pagination via `after`/`next`). The v1
   page-based endpoint is deprecated and is removed after 2026-12-31 — don't reintroduce it.
 - `PATCH /items` (bank refresh) is rate-limited to 20/min and user-triggered only — never poll it.
+- Free-text and voice messages do NOT run the agent in the handler: they go through
+  `ChatInbox.submit()`, which debounces rapid messages (`AGENT_DEBOUNCE_SECONDS`) into ONE agent
+  turn per burst and serializes turns per chat. Never reply to the user directly from the text
+  handler and never bypass the inbox for conversational input.
+- Bot replies are rendered with `rendering.send_markdown()` (Telegram entities, no `parse_mode`);
+  don't send raw LLM output with `message.answer()`.
+- Conversations are sessions: they expire lazily after `AGENT_SESSION_TTL_MINUTES` of silence and
+  `/reset` closes them. There can be many conversation rows per chat — don't assume uniqueness.
 
 ## Testing
 

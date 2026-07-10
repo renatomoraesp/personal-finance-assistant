@@ -71,6 +71,7 @@ async def db_session(engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
             "transactions",
             "conversations",
             "accounts",
+            "user_memories",
             "users",
             "sync_runs",
             "pluggy_items",

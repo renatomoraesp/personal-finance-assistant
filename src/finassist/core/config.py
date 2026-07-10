@@ -25,13 +25,21 @@ class Settings(BaseSettings):
     openrouter_api_key: SecretStr
     openrouter_model: str = "google/gemma-4-26b-a4b-it"
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    openrouter_fallback_models: Annotated[list[str], NoDecode] = []
+    openrouter_timeout_seconds: float = 90.0
+    openrouter_max_retries: int = 2
+    openrouter_transcription_model: str = "openai/whisper-1"
     sync_max_age_minutes: int = 10
     sync_initial_lookback_days: int = 90
     sync_overlap_days: int = 7
     sync_refresh_timeout_seconds: int = 90
     sync_refresh_poll_seconds: float = 2.0
     agent_max_tool_rounds: int = 6
-    agent_history_limit: int = 20
+    agent_debounce_seconds: float = 2.5
+    agent_session_ttl_minutes: int = 360
+    agent_tool_replay_max_chars: int = 2000
+    agent_memory_limit: int = 50
+    agent_history_limit: int = 40
     agent_temperature: float = 0.4
     timezone: str = "America/Sao_Paulo"
 
@@ -44,7 +52,7 @@ class Settings(BaseSettings):
             return [int(part.strip()) for part in value.split(",") if part.strip()]
         return value
 
-    @field_validator("pluggy_item_ids", mode="before")
+    @field_validator("pluggy_item_ids", "openrouter_fallback_models", mode="before")
     @classmethod
     def parse_str_list(cls, value: object) -> object:
         if isinstance(value, str):

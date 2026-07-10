@@ -1,11 +1,40 @@
+import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from aiogram import BaseMiddleware
+import structlog
+from aiogram import BaseMiddleware, Bot
+from aiogram.client.session.middlewares.base import (
+    BaseRequestMiddleware,
+    NextRequestMiddlewareType,
+)
+from aiogram.exceptions import TelegramRetryAfter
+from aiogram.methods import Response, TelegramMethod
+from aiogram.methods.base import TelegramType
 from aiogram.types import Message, TelegramObject
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from finassist.core.config import Settings
+
+logger = structlog.get_logger(__name__)
+
+
+class RetryAfterSessionMiddleware(BaseRequestMiddleware):
+    async def __call__(
+        self,
+        make_request: NextRequestMiddlewareType[TelegramType],
+        bot: Bot,
+        method: TelegramMethod[TelegramType],
+    ) -> Response[TelegramType]:
+        for retry in range(3):
+            try:
+                return await make_request(bot, method)
+            except TelegramRetryAfter as exc:
+                if retry == 2:
+                    raise
+                logger.warning("telegram_retry_after", retry_after=exc.retry_after)
+                await asyncio.sleep(exc.retry_after)
+        raise RuntimeError("unreachable")
 
 
 class AllowlistMiddleware(BaseMiddleware):
